@@ -758,7 +758,7 @@ static void teamd_run_loop_fini(struct teamd_context *ctx)
 	close(ctx->run_loop.ctrl_pipe_w);
 }
 
-static int parse_hwaddr(const char *hwaddr_str, char **phwaddr,
+int parse_hwaddr(const char *hwaddr_str, char **phwaddr,
 			unsigned int *plen)
 {
 	const char *pos = hwaddr_str;

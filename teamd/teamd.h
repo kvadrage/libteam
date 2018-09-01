@@ -391,6 +391,9 @@ static inline bool timespec_is_zero(struct timespec *ts)
 	return !ts->tv_sec && !ts->tv_nsec;
 }
 
+int parse_hwaddr(const char *hwaddr_str, char **phwaddr,
+		unsigned int *plen);
+
 #define TEAMD_ENOENT(err) (err == -ENOENT || err == -ENODEV)
 
 #endif /* _TEAMD_H_ */
