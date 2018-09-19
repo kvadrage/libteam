@@ -246,6 +246,20 @@ Default:
 .BR "0"
 .RE
 .TP
+.BR "runner.hwaddr_policy " (string)
+This defines the policy of how hardware addresses of team device and port devices should be set during the team lifetime. The following are available:
+.RS 7
+.PP
+.BR "same_all "\(em
+All ports will always have the same hardware address as the associated team device.
+.PP
+.BR "no_change "\(em
+All ports will always keep their own hardware addresses unchanged. Team device will adopt the hardware address of the first port associated with it.
+.PP
+Default:
+.BR "same_all"
+.RE
+.TP
 .BR "runner.agg_select_policy " (string)
 This selects the policy of how the aggregators will be selected. The following are available:
 .RS 7

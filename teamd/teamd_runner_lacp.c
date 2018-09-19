@@ -125,6 +125,11 @@ static const char *lacp_agg_select_policy_names_list[] = {
 #define LACP_AGG_SELECT_POLICY_NAMES_LIST_SIZE \
 	ARRAY_SIZE(lacp_agg_select_policy_names_list)
 
+enum lacp_hwaddr_policy_id {
+	LACP_HWADDR_SAME_ALL = 0,
+	LACP_HWADDR_NO_CHANGE = 1,
+};
+
 struct lacp_port;
 
 struct lacp {
@@ -144,7 +149,9 @@ struct lacp {
 #define		LACP_CFG_DFLT_AGG_SELECT_POLICY LACP_AGG_SELECT_LACP_PRIO
 		bool system_id_explicit;
 		uint8_t system_id[ETH_ALEN]; /* ID */;
-    } cfg;
+		enum lacp_hwaddr_policy_id hwaddr_policy;
+#define		LACP_CFG_DFLT_HWADDR_POLICY LACP_HWADDR_SAME_ALL
+	} cfg;
 	struct teamd_balancer *tb;
 };
 
@@ -269,71 +276,6 @@ static int lacp_parse_system_hwaddr(uint8_t *system, const char *system_str)
 free_hwaddr:
 	free(hwaddr);
 	return err;
-}
-
-static int lacp_load_config(struct teamd_context *ctx, struct lacp *lacp)
-{
-	int err;
-	int tmp;
-	const char *system_id;
-	const char *agg_select_policy_name;
-
-	err = teamd_config_bool_get(ctx, &lacp->cfg.active, "$.runner.active");
-	if (err)
-		lacp->cfg.active =  LACP_CFG_DFLT_ACTIVE;
-	teamd_log_dbg("Using active \"%d\".", lacp->cfg.active);
-
-	err = teamd_config_string_get(ctx, &system_id, "$.runner.system_id");
-	if (!err) {
-		err = lacp_parse_system_hwaddr(lacp->cfg.system_id, system_id);
-		if (err) {
-			teamd_log_err("\"system_id\" value is invalid.");
-			return -EINVAL;
-		}
-		lacp->cfg.system_id_explicit = true;
-	}
-	teamd_log_dbg("Using explicit system_id \"%d\", system_id value \"%s\".",
-		lacp->cfg.system_id_explicit, system_id);
-
-	err = teamd_config_int_get(ctx, &tmp, "$.runner.sys_prio");
-	if (err) {
-		lacp->cfg.sys_prio = LACP_CFG_DFLT_SYS_PRIO;
-	} else if (tmp < 0 || tmp > USHRT_MAX) {
-		teamd_log_err("\"sys_prio\" value is out of its limits.");
-		return -EINVAL;
-	} else {
-		lacp->cfg.sys_prio = tmp;
-	}
-	teamd_log_dbg("Using sys_prio \"%d\".", lacp->cfg.sys_prio);
-
-	err = teamd_config_bool_get(ctx, &lacp->cfg.fast_rate, "$.runner.fast_rate");
-	if (err)
-		lacp->cfg.fast_rate = LACP_CFG_DFLT_FAST_RATE;
-	teamd_log_dbg("Using fast_rate \"%d\".", lacp->cfg.fast_rate);
-
-	err = teamd_config_int_get(ctx, &tmp, "$.runner.min_ports");
-	if (err) {
-		lacp->cfg.min_ports = LACP_CFG_DFLT_MIN_PORTS;
-	} else if (tmp < 1 || tmp > UCHAR_MAX) {
-		teamd_log_err("\"min_ports\" value is out of its limits.");
-		return -EINVAL;
-	} else {
-		lacp->cfg.min_ports = tmp;
-	}
-	teamd_log_dbg("Using min_ports \"%d\".", lacp->cfg.min_ports);
-
-	err = teamd_config_string_get(ctx, &agg_select_policy_name, "$.runner.agg_select_policy");
-	if (err)
-		agg_select_policy_name = NULL;
-	err = lacp_assign_agg_select_policy(lacp, agg_select_policy_name);
-	if (err) {
-		teamd_log_err("Unknown \"agg_select_policy\" named \"%s\" passed.",
-			      agg_select_policy_name);
-		return err;
-	}
-	teamd_log_dbg("Using agg_select_policy \"%s\".",
-		      lacp_get_agg_select_policy_name(lacp));
-	return 0;
 }
 
 static bool lacp_port_loopback_free(struct lacp_port *lacp_port)
@@ -1255,6 +1197,201 @@ static int lacp_port_load_config(struct teamd_context *ctx,
 	return 0;
 }
 
+struct lacp_hwaddr_policy {
+    const char *name;
+    int (*hwaddr_changed)(struct teamd_context *ctx,
+			  struct lacp *lacp);
+    int (*port_hwaddr_changed)(struct teamd_context *ctx, struct lacp *lacp,
+			       struct teamd_port *tdport);
+    int (*port_added)(struct teamd_context *ctx, struct lacp *lacp,
+		      struct teamd_port *tdport);
+};
+
+static int lacp_hwaddr_policy_same_all_hwaddr_changed(struct teamd_context *ctx,
+						      struct lacp *lacp)
+{
+	struct teamd_port *tdport;
+	int err;
+
+	teamd_for_each_tdport(tdport, ctx) {
+		struct lacp_port *lacp_port = lacp_port_get(lacp, tdport);
+
+		err = lacp_port_set_mac(ctx, tdport);
+		if (err)
+			return err;
+
+		lacp_port_actor_system_update(lacp_port);
+	}
+	return 0;
+}
+
+static int lacp_hwaddr_policy_same_all_port_hwaddr_changed(struct teamd_context *ctx,
+							   struct lacp *lacp,
+							   struct teamd_port *tdport)
+{
+	struct lacp_port *lacp_port;
+	int err;
+
+	if (!memcmp(team_get_ifinfo_hwaddr(tdport->team_ifinfo),
+		    ctx->hwaddr, ctx->hwaddr_len))
+		return 0;
+
+	err = lacp_port_set_mac(ctx, tdport);
+	if (err)
+		return err;
+
+	lacp_port = lacp_port_get(lacp, tdport);
+	lacp_port_actor_system_update(lacp_port);
+
+	return 0;
+}
+
+static int lacp_hwaddr_policy_same_all_port_added(struct teamd_context *ctx,
+						  struct lacp *lacp,
+						  struct teamd_port *tdport)
+{
+	return lacp_port_set_mac(ctx, tdport);
+}
+
+static int lacp_hwaddr_policy_no_change_hwaddr_changed(struct teamd_context *ctx,
+						       struct lacp *lacp)
+{
+	return 0;
+}
+
+static int lacp_hwaddr_policy_no_change_port_hwaddr_changed(struct teamd_context *ctx,
+							    struct lacp *lacp,
+							    struct teamd_port *tdport)
+{
+	return 0;
+}
+
+static int lacp_hwaddr_policy_no_change_port_added(struct teamd_context *ctx,
+						   struct lacp *lacp,
+						   struct teamd_port *tdport)
+{
+	return 0;
+}
+
+static const struct lacp_hwaddr_policy lacp_hwaddr_policy_same_all = {
+	.name = "same_all",
+	.hwaddr_changed = lacp_hwaddr_policy_same_all_hwaddr_changed,
+	.port_hwaddr_changed = lacp_hwaddr_policy_same_all_port_hwaddr_changed,
+	.port_added = lacp_hwaddr_policy_same_all_port_added,
+};
+
+static const struct lacp_hwaddr_policy lacp_hwaddr_policy_no_change = {
+	.name = "no_change",
+	.hwaddr_changed = lacp_hwaddr_policy_no_change_hwaddr_changed,
+	.port_hwaddr_changed = lacp_hwaddr_policy_no_change_port_hwaddr_changed,
+	.port_added = lacp_hwaddr_policy_no_change_port_added,
+};
+
+static const struct lacp_hwaddr_policy *lacp_hwaddr_policy_list[] = {
+	&lacp_hwaddr_policy_same_all,
+	&lacp_hwaddr_policy_no_change,
+};
+
+#define LACP_HWADDR_POLICY_LIST_SIZE ARRAY_SIZE(lacp_hwaddr_policy_list)
+
+static const struct lacp_hwaddr_policy *lacp_get_hwaddr_policy(struct lacp *lacp)
+{
+	return lacp_hwaddr_policy_list[lacp->cfg.hwaddr_policy];
+}
+
+static int lacp_assign_hwaddr_policy(struct lacp *lacp,
+				     const char *hwaddr_policy_name)
+{
+	int i = LACP_CFG_DFLT_HWADDR_POLICY;
+
+	if (!hwaddr_policy_name)
+		goto found;
+	for (i = 0; i < LACP_HWADDR_POLICY_LIST_SIZE; i++)
+		if (!strcmp(lacp_hwaddr_policy_list[i]->name, hwaddr_policy_name))
+			goto found;
+	return -ENOENT;
+found:
+	lacp->cfg.hwaddr_policy = i;
+	return 0;
+}
+
+static int lacp_load_config(struct teamd_context *ctx, struct lacp *lacp)
+{
+	int err;
+	int tmp;
+	const char *system_id;
+	const char *agg_select_policy_name;
+	const char *hwaddr_policy_name;
+
+	err = teamd_config_bool_get(ctx, &lacp->cfg.active, "$.runner.active");
+	if (err)
+		lacp->cfg.active =  LACP_CFG_DFLT_ACTIVE;
+	teamd_log_dbg("Using active \"%d\".", lacp->cfg.active);
+
+	err = teamd_config_string_get(ctx, &system_id, "$.runner.system_id");
+	if (!err) {
+		err = lacp_parse_system_hwaddr(lacp->cfg.system_id, system_id);
+		if (err) {
+			teamd_log_err("\"system_id\" value is invalid.");
+			return -EINVAL;
+		}
+		lacp->cfg.system_id_explicit = true;
+	}
+	teamd_log_dbg("Using explicit system_id \"%d\", system_id value \"%s\".",
+		      lacp->cfg.system_id_explicit, system_id);
+
+	err = teamd_config_int_get(ctx, &tmp, "$.runner.sys_prio");
+	if (err) {
+		lacp->cfg.sys_prio = LACP_CFG_DFLT_SYS_PRIO;
+	} else if (tmp < 0 || tmp > USHRT_MAX) {
+		teamd_log_err("\"sys_prio\" value is out of its limits.");
+		return -EINVAL;
+	} else {
+		lacp->cfg.sys_prio = tmp;
+	}
+	teamd_log_dbg("Using sys_prio \"%d\".", lacp->cfg.sys_prio);
+
+	err = teamd_config_bool_get(ctx, &lacp->cfg.fast_rate, "$.runner.fast_rate");
+	if (err)
+		lacp->cfg.fast_rate = LACP_CFG_DFLT_FAST_RATE;
+	teamd_log_dbg("Using fast_rate \"%d\".", lacp->cfg.fast_rate);
+
+	err = teamd_config_int_get(ctx, &tmp, "$.runner.min_ports");
+	if (err) {
+		lacp->cfg.min_ports = LACP_CFG_DFLT_MIN_PORTS;
+	} else if (tmp < 1 || tmp > UCHAR_MAX) {
+		teamd_log_err("\"min_ports\" value is out of its limits.");
+		return -EINVAL;
+	} else {
+		lacp->cfg.min_ports = tmp;
+	}
+	teamd_log_dbg("Using min_ports \"%d\".", lacp->cfg.min_ports);
+
+	err = teamd_config_string_get(ctx, &agg_select_policy_name, "$.runner.agg_select_policy");
+	if (err)
+		agg_select_policy_name = NULL;
+	err = lacp_assign_agg_select_policy(lacp, agg_select_policy_name);
+	if (err) {
+		teamd_log_err("Unknown \"agg_select_policy\" named \"%s\" passed.",
+			      agg_select_policy_name);
+		return err;
+	}
+	teamd_log_dbg("Using agg_select_policy \"%s\".",
+		      lacp_get_agg_select_policy_name(lacp));
+
+	err = teamd_config_string_get(ctx, &hwaddr_policy_name, "$.runner.hwaddr_policy");
+	if (err)
+		hwaddr_policy_name = NULL;
+	err = lacp_assign_hwaddr_policy(lacp, hwaddr_policy_name);
+	if (err) {
+		teamd_log_err("Unknown \"hwaddr_policy\" named \"%s\" passed.",
+			      hwaddr_policy_name);
+		return err;
+	}
+	teamd_log_dbg("Using hwaddr_policy \"%s\".", lacp_get_hwaddr_policy(lacp)->name);
+	return 0;
+}
+
 static int lacp_port_added(struct teamd_context *ctx,
 			   struct teamd_port *tdport,
 			   void *priv, void *creator_priv)
@@ -1317,9 +1454,11 @@ static int lacp_port_added(struct teamd_context *ctx,
 			goto timeout_callback_del;
 	}
 
-	err = lacp_port_set_mac(ctx, tdport);
-	if (err)
-		goto timeout_callback_del;
+	if (lacp_get_hwaddr_policy(lacp)->port_added) {
+		err = lacp_get_hwaddr_policy(lacp)->port_added(ctx, lacp, tdport);
+		if (err)
+			goto timeout_callback_del;
+	}
 
 	lacp_port_actor_init(lacp_port);
 	lacp_port_link_update(lacp_port);
@@ -1364,17 +1503,14 @@ static int lacp_event_watch_hwaddr_changed(struct teamd_context *ctx,
 					   void *priv)
 {
 	struct lacp *lacp = priv;
-	struct teamd_port *tdport;
 	int err;
 
-	teamd_for_each_tdport(tdport, ctx) {
-		struct lacp_port *lacp_port = lacp_port_get(lacp, tdport);
-
-		err = lacp_port_set_mac(ctx, tdport);
+	if (lacp_get_hwaddr_policy(lacp)->hwaddr_changed) {
+		err = lacp_get_hwaddr_policy(lacp)->hwaddr_changed(ctx, lacp);
 		if (err)
 			return err;
-		lacp_port_actor_system_update(lacp_port);
 	}
+
 	return 0;
 }
 
@@ -1382,23 +1518,17 @@ static int lacp_event_watch_port_hwaddr_changed(struct teamd_context *ctx,
 						struct teamd_port *tdport,
 						void *priv)
 {
-	struct lacp_port *lacp_port;
 	struct lacp *lacp = priv;
 	int err;
 
 	if (!teamd_port_present(ctx, tdport))
 		return 0;
 
-	if (!memcmp(team_get_ifinfo_hwaddr(tdport->team_ifinfo),
-		    ctx->hwaddr, ctx->hwaddr_len))
-		return 0;
-
-	err = lacp_port_set_mac(ctx, tdport);
-	if (err)
-		return err;
-
-	lacp_port = lacp_port_get(lacp, tdport);
-	lacp_port_actor_system_update(lacp_port);
+	if (lacp_get_hwaddr_policy(lacp)->port_hwaddr_changed) {
+		err = lacp_get_hwaddr_policy(lacp)->port_hwaddr_changed(ctx, lacp, tdport);
+		if (err)
+			return err;
+	}
 
 	return 0;
 }
