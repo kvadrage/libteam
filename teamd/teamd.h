@@ -374,6 +374,9 @@ int teamd_send(int sockfd, const void *buf, size_t len, int flags);
 int teamd_recvfrom(int sockfd, void *buf, size_t len, int flags,
 		   struct sockaddr *src_addr, socklen_t addrlen);
 
+int teamd_parse_hwaddr(const char *hwaddr_str, char **phwaddr,
+		       unsigned int *plen);
+
 /* Various helpers */
 static inline void ms_to_timespec(struct timespec *ts, int ms)
 {

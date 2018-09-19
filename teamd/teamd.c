@@ -758,7 +758,7 @@ static void teamd_run_loop_fini(struct teamd_context *ctx)
 	close(ctx->run_loop.ctrl_pipe_w);
 }
 
-static int parse_hwaddr(const char *hwaddr_str, char **phwaddr,
+int teamd_parse_hwaddr(const char *hwaddr_str, char **phwaddr,
 			unsigned int *plen)
 {
 	const char *pos = hwaddr_str;
@@ -815,7 +815,7 @@ static int teamd_set_hwaddr(struct teamd_context *ctx)
 		return 0; /* addr is not defined in config, no change needed */
 
 	teamd_log_dbg("Hwaddr string: \"%s\".", hwaddr_str);
-	err = parse_hwaddr(hwaddr_str, &hwaddr, &hwaddr_len);
+	err = teamd_parse_hwaddr(hwaddr_str, &hwaddr, &hwaddr_len);
 	if (err) {
 		teamd_log_err("Failed to parse hardware address.");
 		return err;
