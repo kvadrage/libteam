@@ -142,7 +142,9 @@ struct lacp {
 #define		LACP_CFG_DFLT_MIN_PORTS 1
 		enum lacp_agg_select_policy agg_select_policy;
 #define		LACP_CFG_DFLT_AGG_SELECT_POLICY LACP_AGG_SELECT_LACP_PRIO
-	} cfg;
+		bool system_id_explicit;
+		uint8_t system_id[ETH_ALEN]; /* ID */;
+    } cfg;
 	struct teamd_balancer *tb;
 };
 
@@ -245,16 +247,53 @@ found:
 	return 0;
 }
 
+static int lacp_parse_system_hwaddr(uint8_t *system, const char *system_str)
+{
+	int err;
+	char *hwaddr;
+	unsigned int hwaddr_len;
+
+	err = teamd_parse_hwaddr(system_str, &hwaddr, &hwaddr_len);
+	if (err) {
+		teamd_log_err("Failed to parse hardware address for system id.");
+		return err;
+	}
+
+	if (hwaddr_len != ETH_ALEN) {
+		teamd_log_err("Passed hardware address for system id has incorrect length (%d), expected: (%d).",
+			hwaddr_len, ETH_ALEN);
+		err = -EINVAL;
+		goto free_hwaddr;
+	}
+	memcpy(system, hwaddr, hwaddr_len);
+free_hwaddr:
+	free(hwaddr);
+	return err;
+}
+
 static int lacp_load_config(struct teamd_context *ctx, struct lacp *lacp)
 {
 	int err;
 	int tmp;
+	const char *system_id;
 	const char *agg_select_policy_name;
 
 	err = teamd_config_bool_get(ctx, &lacp->cfg.active, "$.runner.active");
 	if (err)
 		lacp->cfg.active =  LACP_CFG_DFLT_ACTIVE;
 	teamd_log_dbg("Using active \"%d\".", lacp->cfg.active);
+
+	err = teamd_config_string_get(ctx, &system_id, "$.runner.system_id");
+	if (!err) {
+		err = lacp_parse_system_hwaddr(lacp->cfg.system_id, system_id);
+		if (err) {
+			teamd_log_err("\"system_id\" value is invalid.");
+			return -EINVAL;
+		}
+		lacp->cfg.system_id_explicit = true;
+	}
+	teamd_log_dbg("Using explicit system_id \"%d\", system_id value \"%s\".",
+		lacp->cfg.system_id_explicit, system_id);
 
 	err = teamd_config_int_get(ctx, &tmp, "$.runner.sys_prio");
 	if (err) {
@@ -891,7 +930,10 @@ static void lacp_port_actor_system_update(struct lacp_port *lacp_port)
 {
 	struct lacpdu_info *actor = &lacp_port->actor;
 
-	memcpy(actor->system, lacp_port->ctx->hwaddr, ETH_ALEN);
+	if (lacp_port->lacp->cfg.system_id_explicit)
+		memcpy(actor->system, lacp_port->lacp->cfg.system_id, ETH_ALEN);
+	else
+		memcpy(actor->system, lacp_port->ctx->hwaddr, ETH_ALEN);
 }
 
 static void lacp_port_actor_init(struct lacp_port *lacp_port)
@@ -1046,7 +1088,7 @@ static int lacpdu_send(struct lacp_port *lacp_port)
 	ll_slow = ll_my;
 	memcpy(ll_slow.sll_addr, slow_addr, ll_slow.sll_halen);
 
-	memcpy(lacp_port->actor.system, lacp_port->ctx->hwaddr, ETH_ALEN);
+	lacp_port_actor_system_update(lacp_port);
 
 	hwaddr = team_get_ifinfo_orig_hwaddr(lacp_port->tdport->team_ifinfo);
 	hwaddr_len = team_get_ifinfo_orig_hwaddr_len(lacp_port->tdport->team_ifinfo);
